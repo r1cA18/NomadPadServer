@@ -32,5 +32,7 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>NomadPad needs local network access to communicate with your iPhone/iPad</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>NomadPad needs to control System Events for spaces switching and keyboard shortcuts</string>
 </dict>
 </plist>
