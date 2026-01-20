@@ -1,0 +1,40 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Carthage
+Carthage/Build/
+
+# IDE
+*.xcworkspace
+!*.xcodeproj/project.xcworkspace/
+.idea/
+*.swp
+*~
+
+# Archives
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Temporary files
+*.tmp
+*.temp

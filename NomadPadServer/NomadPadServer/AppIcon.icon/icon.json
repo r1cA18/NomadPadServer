@@ -1,0 +1,40 @@
+{
+  "fill" : {
+    "solid" : "srgb:0.96611,0.98606,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "glass" : true,
+          "image-name" : "hand-finger-click-icon.svg",
+          "name" : "hand-finger-click-icon",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 6.42,
+            "translation-in-points" : [
+              -34,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
