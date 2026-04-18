@@ -3,43 +3,53 @@ import Foundation
 import Network
 import Security
 
-// MARK: - Pending Connection Info
-struct PendingConnectionInfo {
-    let connection: NWConnection
-    let deviceName: String
-    let deviceId: String
-    let requestTime: Date
-}
-
 // MARK: - Connected Client Info
 struct ConnectedClientInfo {
     let connection: NWConnection
     let deviceName: String
     let deviceId: String
+    let deviceToken: String
     let connectedAt: Date
     var lastHeartbeat: Date
 }
 
+struct ControllerIdentity: Equatable {
+    let deviceId: String
+    let deviceToken: String
+}
+
+enum ConnectionAdmissionDecision: Equatable {
+    case approveNew
+    case replaceExisting
+    case denyNew
+
+    static func resolve(
+        request: ControllerIdentity,
+        active: ControllerIdentity?
+    ) -> ConnectionAdmissionDecision {
+        guard let active else { return .approveNew }
+        return active == request ? .replaceExisting : .denyNew
+    }
+}
+
 // MARK: - Network Server Delegate
 protocol NetworkServerDelegate: AnyObject {
-    func networkServer(_ server: NetworkServer, didReceiveConnectionRequest request: ConnectionRequestMessage, from connection: NWConnection)
     func networkServer(_ server: NetworkServer, clientDidConnect client: ConnectedClientInfo)
     func networkServer(_ server: NetworkServer, clientDidDisconnect deviceName: String, reason: DisconnectReason)
-    func networkServer(_ server: NetworkServer, didCancelConnectionRequest deviceId: String, deviceName: String)
 }
 
 class NetworkServer {
     private var listener: NWListener?
-    private var pendingConnections: [String: PendingConnectionInfo] = [:] // deviceId -> info
     private var connectedClients: [String: ConnectedClientInfo] = [:] // deviceId -> info
     private let queue = DispatchQueue(label: "com.deskpad.server", qos: .userInteractive)
     private let queueKey = DispatchSpecificKey<Void>()
     private let pairingKeyProvider: () -> Data
     private var receiveBuffers: [ObjectIdentifier: Data] = [:]
+    private var handshakeTimeoutWorkItems: [ObjectIdentifier: DispatchWorkItem] = [:]
     private let maxFrameSize = 64 * 1024
 
     // Timeouts
-    private let connectionRequestTimeout: TimeInterval = 60.0
+    private let connectionRequestTimeout: TimeInterval = 10.0
     private let heartbeatTimeout: TimeInterval = 15.0
     private var heartbeatCheckTimer: Timer?
 
@@ -120,71 +130,16 @@ class NetworkServer {
             self.listener?.cancel()
 
             // Cancel all connections
-            for info in self.pendingConnections.values {
-                info.connection.cancel()
-            }
             for client in self.connectedClients.values {
                 client.connection.cancel()
             }
+            for workItem in self.handshakeTimeoutWorkItems.values {
+                workItem.cancel()
+            }
 
-            self.pendingConnections.removeAll()
             self.connectedClients.removeAll()
             self.receiveBuffers.removeAll()
-        }
-    }
-
-    // MARK: - Connection Approval
-
-    func approveConnection(deviceId: String) {
-        runOnQueue { [weak self] in
-            guard let self = self else { return }
-            guard let pendingInfo = self.pendingConnections.removeValue(forKey: deviceId) else {
-                print("[NetworkServer] No pending connection for deviceId: \(deviceId)")
-                return
-            }
-
-            // Create connected client info
-            let clientInfo = ConnectedClientInfo(
-                connection: pendingInfo.connection,
-                deviceName: pendingInfo.deviceName,
-                deviceId: deviceId,
-                connectedAt: Date(),
-                lastHeartbeat: Date()
-            )
-
-            self.connectedClients[deviceId] = clientInfo
-
-            // Send approval response
-            let response = ConnectionResponseMessage(approved: true)
-            self.sendControlMessage(response, to: pendingInfo.connection)
-
-            print("[NetworkServer] Approved connection from: \(pendingInfo.deviceName)")
-
-            notifyOnMain { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.networkServer(self, clientDidConnect: clientInfo)
-            }
-        }
-    }
-
-    func denyConnection(deviceId: String) {
-        runOnQueue { [weak self] in
-            guard let self = self else { return }
-            guard let pendingInfo = self.pendingConnections.removeValue(forKey: deviceId) else {
-                print("[NetworkServer] No pending connection for deviceId: \(deviceId)")
-                return
-            }
-
-            // Send denial response
-            let response = ConnectionResponseMessage(approved: false)
-            self.sendControlMessage(response, to: pendingInfo.connection)
-
-            // Close connection after a short delay to ensure message is sent
-            self.queue.asyncAfter(deadline: .now() + 0.5) {
-                pendingInfo.connection.cancel()
-            }
-
-            print("[NetworkServer] Denied connection from: \(pendingInfo.deviceName)")
+            self.handshakeTimeoutWorkItems.removeAll()
         }
     }
 
@@ -249,11 +204,6 @@ class NetworkServer {
         DispatchQueue.main.async(execute: block)
     }
 
-    private func pendingConnectionEntry(for connection: NWConnection) -> (deviceId: String, info: PendingConnectionInfo)? {
-        pendingConnections.first { $0.value.connection === connection }
-            .map { (deviceId: $0.key, info: $0.value) }
-    }
-
     private func connectedClientEntry(for connection: NWConnection) -> (deviceId: String, client: ConnectedClientInfo)? {
         connectedClients.first { $0.value.connection === connection }
             .map { (deviceId: $0.key, client: $0.value) }
@@ -273,7 +223,9 @@ class NetworkServer {
             }
         }
 
-        receiveBuffers[ObjectIdentifier(connection)] = Data()
+        let connectionKey = ObjectIdentifier(connection)
+        receiveBuffers[connectionKey] = Data()
+        scheduleHandshakeTimeout(for: connection)
         connection.start(queue: queue)
     }
 
@@ -332,6 +284,8 @@ class NetworkServer {
             notifyOnMain { [weak self] in
                 self?.onMessageReceived?(message)
             }
+        } else if !isApprovedConnection(connection) {
+            connection.cancel()
         }
     }
 
@@ -354,38 +308,77 @@ class NetworkServer {
     }
 
     private func handleConnectionRequest(_ request: ConnectionRequestMessage, from connection: NWConnection) {
-        // Check if already connected
-        if connectedClients[request.deviceId] != nil {
-            print("[NetworkServer] Device already connected: \(request.deviceName)")
-            return
+        cancelHandshakeTimeout(for: connection)
+
+        let requestIdentity = ControllerIdentity(
+            deviceId: request.deviceId,
+            deviceToken: request.deviceToken
+        )
+        let activeClient = connectedClients.values.first
+        let activeIdentity = activeClient.map {
+            ControllerIdentity(deviceId: $0.deviceId, deviceToken: $0.deviceToken)
         }
 
-        // PSK validated through TLS - auto-approve all connections
-        print("[NetworkServer] PSK validated, auto-approving: \(request.deviceName)")
-        autoApproveConnection(request: request, connection: connection)
+        switch ConnectionAdmissionDecision.resolve(request: requestIdentity, active: activeIdentity) {
+        case .approveNew:
+            print("[NetworkServer] PSK validated, approving controller: \(request.deviceName)")
+            approveConnectionRequest(request, on: connection, replacing: nil)
+        case .replaceExisting:
+            guard let activeClient else {
+                approveConnectionRequest(request, on: connection, replacing: nil)
+                return
+            }
+            print("[NetworkServer] Replacing active controller for: \(request.deviceName)")
+            approveConnectionRequest(request, on: connection, replacing: activeClient)
+        case .denyNew:
+            print("[NetworkServer] Denying additional controller while another device is active: \(request.deviceName)")
+            denyConnectionRequest(on: connection)
+        }
     }
 
-    private func autoApproveConnection(request: ConnectionRequestMessage, connection: NWConnection) {
-        // Create connected client info
+    private func approveConnectionRequest(
+        _ request: ConnectionRequestMessage,
+        on connection: NWConnection,
+        replacing previousClient: ConnectedClientInfo?
+    ) {
         let clientInfo = ConnectedClientInfo(
             connection: connection,
             deviceName: request.deviceName,
             deviceId: request.deviceId,
+            deviceToken: request.deviceToken,
             connectedAt: Date(),
             lastHeartbeat: Date()
         )
 
-        connectedClients[request.deviceId] = clientInfo
-
-        // Send approval response
         let response = ConnectionResponseMessage(approved: true)
-        sendControlMessage(response, to: connection)
+        sendControlMessage(response, to: connection) { [weak self] error in
+            guard let self else { return }
+            guard error == nil else {
+                connection.cancel()
+                return
+            }
 
-        print("[NetworkServer] Auto-approved connection from: \(request.deviceName)")
+            if let previousClient {
+                self.connectedClients.removeValue(forKey: previousClient.deviceId)
+            }
+            self.connectedClients = [request.deviceId: clientInfo]
+            previousClient?.connection.cancel()
 
-        notifyOnMain { [weak self] in
-            guard let self = self else { return }
-            self.delegate?.networkServer(self, clientDidConnect: clientInfo)
+            print("[NetworkServer] Approved connection from: \(request.deviceName)")
+
+            self.notifyOnMain { [weak self] in
+                guard let self else { return }
+                self.delegate?.networkServer(self, clientDidConnect: clientInfo)
+            }
+        }
+    }
+
+    private func denyConnectionRequest(on connection: NWConnection) {
+        let response = ConnectionResponseMessage(approved: false)
+        sendControlMessage(response, to: connection) { [weak self] _ in
+            self?.queue.asyncAfter(deadline: .now() + 0.2) {
+                connection.cancel()
+            }
         }
     }
 
@@ -415,19 +408,10 @@ class NetworkServer {
     }
 
     private func handleConnectionClosed(_ connection: NWConnection) {
-        receiveBuffers.removeValue(forKey: ObjectIdentifier(connection))
+        let connectionKey = ObjectIdentifier(connection)
+        receiveBuffers.removeValue(forKey: connectionKey)
+        cancelHandshakeTimeout(for: connection)
 
-        // Check pending connections
-        if let entry = pendingConnectionEntry(for: connection) {
-            pendingConnections.removeValue(forKey: entry.deviceId)
-            notifyOnMain { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.networkServer(self, didCancelConnectionRequest: entry.deviceId, deviceName: entry.info.deviceName)
-            }
-            return
-        }
-
-        // Check connected clients
         if let entry = connectedClientEntry(for: connection) {
             connectedClients.removeValue(forKey: entry.deviceId)
 
@@ -438,34 +422,24 @@ class NetworkServer {
         }
     }
 
-    private func timeoutPendingConnection(deviceId: String) {
-        guard let pendingInfo = pendingConnections.removeValue(forKey: deviceId) else { return }
-
-        // Send denial due to timeout
-        let response = ConnectionResponseMessage(approved: false)
-        sendControlMessage(response, to: pendingInfo.connection)
-
-        notifyOnMain { [weak self] in
-            guard let self = self else { return }
-            self.delegate?.networkServer(self, didCancelConnectionRequest: deviceId, deviceName: pendingInfo.deviceName)
-        }
-
-        queue.asyncAfter(deadline: .now() + 0.5) {
-            pendingInfo.connection.cancel()
-        }
-
-        print("[NetworkServer] Connection request timed out: \(pendingInfo.deviceName)")
-    }
-
     private func isApprovedConnection(_ connection: NWConnection) -> Bool {
         connectedClientEntry(for: connection) != nil
     }
 
     private func sendControlMessage(_ message: any ControlMessage, to connection: NWConnection) {
+        sendControlMessage(message, to: connection) { _ in }
+    }
+
+    private func sendControlMessage(
+        _ message: any ControlMessage,
+        to connection: NWConnection,
+        completion: @escaping (NWError?) -> Void
+    ) {
         sendFramed(message.encode(), to: connection) { error in
             if let error = error {
                 print("[NetworkServer] Failed to send control message: \(error.localizedDescription)")
             }
+            completion(error)
         }
     }
 
@@ -492,6 +466,27 @@ class NetworkServer {
         data.withUnsafeBytes { buffer in
             DispatchData(bytes: buffer) as dispatch_data_t
         }
+    }
+
+    private func scheduleHandshakeTimeout(for connection: NWConnection) {
+        let connectionKey = ObjectIdentifier(connection)
+        let workItem = DispatchWorkItem { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            guard !self.isApprovedConnection(connection) else { return }
+
+            print("[NetworkServer] Closing idle connection before controller identity was established")
+            connection.cancel()
+        }
+
+        handshakeTimeoutWorkItems[connectionKey]?.cancel()
+        handshakeTimeoutWorkItems[connectionKey] = workItem
+        queue.asyncAfter(deadline: .now() + connectionRequestTimeout, execute: workItem)
+    }
+
+    private func cancelHandshakeTimeout(for connection: NWConnection) {
+        let connectionKey = ObjectIdentifier(connection)
+        handshakeTimeoutWorkItems[connectionKey]?.cancel()
+        handshakeTimeoutWorkItems.removeValue(forKey: connectionKey)
     }
 
     // MARK: - Heartbeat Check

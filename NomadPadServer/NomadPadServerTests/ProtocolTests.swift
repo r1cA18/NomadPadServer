@@ -151,6 +151,38 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(decoded?.text, "\u{7F}")
     }
 
+    // MARK: - ConnectionRequestMessage Tests
+
+    func testConnectionRequestMessageEncodeDecodeRoundTrip() {
+        let original = ConnectionRequestMessage(
+            deviceName: "iPhone",
+            deviceId: "12345678-1234-1234-1234-1234567890AB",
+            deviceToken: String(repeating: "b", count: ConnectionRequestMessage.deviceTokenLength)
+        )
+        let decoded = ConnectionRequestMessage.decode(from: original.encode())
+
+        XCTAssertEqual(decoded?.deviceName, original.deviceName)
+        XCTAssertEqual(decoded?.deviceId, original.deviceId)
+        XCTAssertEqual(decoded?.deviceToken, original.deviceToken)
+    }
+
+    func testConnectionAdmissionDecisionAllowsFirstController() {
+        let request = ControllerIdentity(deviceId: "device-1", deviceToken: "token-1")
+        XCTAssertEqual(ConnectionAdmissionDecision.resolve(request: request, active: nil), .approveNew)
+    }
+
+    func testConnectionAdmissionDecisionReplacesSameController() {
+        let request = ControllerIdentity(deviceId: "device-1", deviceToken: "token-1")
+        let active = ControllerIdentity(deviceId: "device-1", deviceToken: "token-1")
+        XCTAssertEqual(ConnectionAdmissionDecision.resolve(request: request, active: active), .replaceExisting)
+    }
+
+    func testConnectionAdmissionDecisionDeniesDifferentController() {
+        let request = ControllerIdentity(deviceId: "device-2", deviceToken: "token-2")
+        let active = ControllerIdentity(deviceId: "device-1", deviceToken: "token-1")
+        XCTAssertEqual(ConnectionAdmissionDecision.resolve(request: request, active: active), .denyNew)
+    }
+
     // MARK: - MessageDecoder Tests
 
     func testMessageDecoderMouseMove() {

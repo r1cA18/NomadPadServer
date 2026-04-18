@@ -15,14 +15,11 @@
 		A1000003001 /* NetworkServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000003000 /* NetworkServer.swift */; };
 		A1000004001 /* MouseController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000004000 /* MouseController.swift */; };
 		A1000005001 /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000005000 /* Protocol.swift */; };
-		B1000100001 /* HelperManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000200001 /* HelperManager.swift */; };
-		B1000100002 /* HelperProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000200002 /* HelperProtocol.swift */; };
 		B1000100003 /* HelperProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000200002 /* HelperProtocol.swift */; };
 		B1000100004 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000200003 /* main.swift */; };
 		B1000100005 /* HelperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000200004 /* HelperService.swift */; };
 		B1000100006 /* EventController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000200005 /* EventController.swift */; };
 		B1000100007 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 04EA3EC1CF9B55364BDBEC42 /* Cocoa.framework */; };
-		B1000100008 /* NomadPadHelper.app in CopyFiles */ = {isa = PBXBuildFile; fileRef = B1000200008 /* NomadPadHelper.app */; };
 		F5FC656BB02775072A218E5A /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 04EA3EC1CF9B55364BDBEC42 /* Cocoa.framework */; };
 /* End PBXBuildFile section */
 
@@ -33,13 +30,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = A1000030000;
 			remoteInfo = NomadPadServer;
-		};
-		B1000700001 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = A1000050000 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = B1000500001;
-			remoteInfo = NomadPadHelper;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -56,7 +46,6 @@
 		A1000006000 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000007000 /* NomadPadServer.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NomadPadServer.entitlements; sourceTree = "<group>"; };
 		A1000008000 /* NomadPadServer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NomadPadServer.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B1000200001 /* HelperManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelperManager.swift; sourceTree = "<group>"; };
 		B1000200002 /* HelperProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HelperProtocol.swift; path = ../Shared/HelperProtocol.swift; sourceTree = "<group>"; };
 		B1000200003 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		B1000200004 /* HelperService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelperService.swift; sourceTree = "<group>"; };
@@ -75,14 +64,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		C72409D03E8E9F27678B04FA /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				F5FC656BB02775072A218E5A /* Cocoa.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		B1000400002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -91,21 +72,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXFrameworksBuildPhase section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		B1000400004 /* Embed Login Item */ = {
-			isa = PBXCopyFilesBuildPhase;
+		C72409D03E8E9F27678B04FA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "Contents/Library/LoginItems";
-			dstSubfolderSpec = 1;
 			files = (
-				B1000100008 /* NomadPadHelper.app in CopyFiles */,
+				F5FC656BB02775072A218E5A /* Cocoa.framework in Frameworks */,
 			);
-			name = "Embed Login Item";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXCopyFilesBuildPhase section */
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		0979EBB03FA9D43E3939F6B2 /* NomadPadServerTests */ = {
@@ -115,27 +90,6 @@
 				422B23B9ABF6AEA35698575B /* MouseControllerTests.swift */,
 			);
 			name = NomadPadServerTests;
-			sourceTree = "<group>";
-		};
-		B1000300001 /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				B1000200002 /* HelperProtocol.swift */,
-			);
-			name = Shared;
-			path = ../Shared;
-			sourceTree = "<group>";
-		};
-		B1000300002 /* NomadPadHelper */ = {
-			isa = PBXGroup;
-			children = (
-				B1000200003 /* main.swift */,
-				B1000200004 /* HelperService.swift */,
-				B1000200005 /* EventController.swift */,
-				B1000200006 /* Info.plist */,
-				B1000200007 /* NomadPadHelper.entitlements */,
-			);
-			path = ../NomadPadHelper/NomadPadHelper;
 			sourceTree = "<group>";
 		};
 		37BA8D812D60C38B995D8DEB /* OS X */ = {
@@ -150,7 +104,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000021000 /* NomadPadServer */,
-				B1000300002 /* NomadPadHelper */,
+				B1000300002 /* ../NomadPadHelper/NomadPadHelper */,
 				B1000300001 /* Shared */,
 				A1000022000 /* Products */,
 				F54040A350E58F35A6C490F4 /* Frameworks */,
@@ -165,7 +119,6 @@
 				A1000002000 /* AppDelegate.swift */,
 				A1000003000 /* NetworkServer.swift */,
 				A1000004000 /* MouseController.swift */,
-				B1000200001 /* HelperManager.swift */,
 				A1000005000 /* Protocol.swift */,
 				A1000006000 /* Info.plist */,
 				A1000007000 /* NomadPadServer.entitlements */,
@@ -182,6 +135,27 @@
 				E7EF016B2FC024233C35B585 /* NomadPadServerTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B1000300001 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				B1000200002 /* HelperProtocol.swift */,
+			);
+			name = Shared;
+			path = ../Shared;
+			sourceTree = "<group>";
+		};
+		B1000300002 /* ../NomadPadHelper/NomadPadHelper */ = {
+			isa = PBXGroup;
+			children = (
+				B1000200003 /* main.swift */,
+				B1000200004 /* HelperService.swift */,
+				B1000200005 /* EventController.swift */,
+				B1000200006 /* Info.plist */,
+				B1000200007 /* NomadPadHelper.entitlements */,
+			);
+			path = ../NomadPadHelper/NomadPadHelper;
 			sourceTree = "<group>";
 		};
 		F54040A350E58F35A6C490F4 /* Frameworks */ = {
@@ -220,12 +194,10 @@
 				A1000031000 /* Sources */,
 				A1000010000 /* Frameworks */,
 				A1000032000 /* Resources */,
-				B1000400004 /* Embed Login Item */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				B1000600001 /* PBXTargetDependency */,
 			);
 			name = NomadPadServer;
 			productName = NomadPadServer;
@@ -321,18 +293,7 @@
 				A1000002001 /* AppDelegate.swift in Sources */,
 				A1000003001 /* NetworkServer.swift in Sources */,
 				A1000004001 /* MouseController.swift in Sources */,
-				B1000100001 /* HelperManager.swift in Sources */,
 				A1000005001 /* Protocol.swift in Sources */,
-				B1000100002 /* HelperProtocol.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		E25A1F564CD678260A2F7069 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				383D0025D84060EBDB650A51 /* ProtocolTests.swift in Sources */,
-				5509BCB0A55D63EDBAFB213A /* MouseControllerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -347,6 +308,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E25A1F564CD678260A2F7069 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				383D0025D84060EBDB650A51 /* ProtocolTests.swift in Sources */,
+				5509BCB0A55D63EDBAFB213A /* MouseControllerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -355,12 +325,6 @@
 			name = NomadPadServer;
 			target = A1000030000 /* NomadPadServer */;
 			targetProxy = EEA7836A63141B5E1CE751D4 /* PBXContainerItemProxy */;
-		};
-		B1000600001 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = NomadPadHelper;
-			target = B1000500001 /* NomadPadHelper */;
-			targetProxy = B1000700001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -539,7 +503,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.r1ca18.NomadPadServer;
+				PRODUCT_BUNDLE_IDENTIFIER = com.r1ca18.NomadPadServer.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -587,7 +551,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.r1ca18.NomadPadServer.Helper;
+				PRODUCT_BUNDLE_IDENTIFIER = com.r1ca18.NomadPadServer.debug.Helper;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
@@ -636,20 +600,20 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B1000800003 /* Build configuration list for PBXNativeTarget "NomadPadHelper" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				B1000800001 /* Debug */,
-				B1000800002 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		A1000051000 /* Build configuration list for PBXProject "NomadPadServer" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1000060000 /* Debug */,
 				A1000060001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B1000800003 /* Build configuration list for PBXNativeTarget "NomadPadHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1000800001 /* Debug */,
+				B1000800002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

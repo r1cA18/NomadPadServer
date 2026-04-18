@@ -230,13 +230,16 @@ struct ConnectionRequestMessage: ControlMessage {
     let controlType: ControlMessageType = .connectionRequest
     let deviceName: String
     let deviceId: String
+    let deviceToken: String
 
     static let maxNameLength = 64
     static let deviceIdLength = 36 // UUID string length
+    static let deviceTokenLength = 64 // 32 random bytes encoded as hex
 
-    init(deviceName: String, deviceId: String) {
+    init(deviceName: String, deviceId: String, deviceToken: String) {
         self.deviceName = deviceName
         self.deviceId = deviceId
+        self.deviceToken = deviceToken
     }
 
     func encode() -> Data {
@@ -252,6 +255,10 @@ struct ConnectionRequestMessage: ControlMessage {
         let idData = deviceId.data(using: .utf8) ?? Data()
         data.append(idData.prefix(Self.deviceIdLength))
 
+        // Device token (fixed length hex string)
+        let tokenData = deviceToken.data(using: .utf8) ?? Data()
+        data.append(tokenData.prefix(Self.deviceTokenLength))
+
         return data
     }
 
@@ -260,7 +267,7 @@ struct ConnectionRequestMessage: ControlMessage {
               data[0] == ControlMessageType.connectionRequest.rawValue else { return nil }
 
         let nameLength = Int(data[1])
-        guard data.count >= 2 + nameLength + Self.deviceIdLength else { return nil }
+        guard data.count >= 2 + nameLength + Self.deviceIdLength + Self.deviceTokenLength else { return nil }
 
         let nameData = data.subdata(in: 2..<(2 + nameLength))
         guard let deviceName = String(data: nameData, encoding: .utf8) else { return nil }
@@ -269,7 +276,11 @@ struct ConnectionRequestMessage: ControlMessage {
         let idData = data.subdata(in: idStart..<(idStart + Self.deviceIdLength))
         guard let deviceId = String(data: idData, encoding: .utf8) else { return nil }
 
-        return ConnectionRequestMessage(deviceName: deviceName, deviceId: deviceId)
+        let tokenStart = idStart + Self.deviceIdLength
+        let tokenData = data.subdata(in: tokenStart..<(tokenStart + Self.deviceTokenLength))
+        guard let deviceToken = String(data: tokenData, encoding: .utf8) else { return nil }
+
+        return ConnectionRequestMessage(deviceName: deviceName, deviceId: deviceId, deviceToken: deviceToken)
     }
 }
 

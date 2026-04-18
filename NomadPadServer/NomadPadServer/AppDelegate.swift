@@ -9,7 +9,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var networkServer: NetworkServer?
     private var mouseController: MouseController?
-    private let helperManager = HelperManager.shared
 
     // Connection state for UI updates
     @Published var isConnected = false
@@ -19,10 +18,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let pairingManager = PairingManager.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        helperManager.start()
         setupMenuBar()
         setupServer()
         checkAccessibilityPermission()
+        requestNotificationPermission()
     }
 
     // MARK: - Setup
@@ -171,6 +170,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
     // MARK: - Actions
 
     @objc private func togglePopover() {
@@ -192,11 +195,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - NetworkServerDelegate
 
 extension AppDelegate: NetworkServerDelegate {
-    func networkServer(_ server: NetworkServer, didReceiveConnectionRequest request: ConnectionRequestMessage, from connection: NWConnection) {
-        // All connections are auto-approved via PSK validation
-        // This delegate method is kept for protocol conformance but won't be called
-    }
-
     func networkServer(_ server: NetworkServer, clientDidConnect client: ConnectedClientInfo) {
         updateConnectionState(connected: true, clientName: client.deviceName, connectedAt: client.connectedAt)
     }
@@ -208,10 +206,6 @@ extension AppDelegate: NetworkServerDelegate {
         if reason == .timeout || reason == .networkError {
             showDisconnectionNotification(deviceName: deviceName, reason: reason)
         }
-    }
-
-    func networkServer(_ server: NetworkServer, didCancelConnectionRequest deviceId: String, deviceName: String) {
-        // No longer needed since we auto-approve all connections
     }
 
     private func showDisconnectionNotification(deviceName: String, reason: DisconnectReason) {
@@ -253,9 +247,10 @@ struct StatusView: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
-            // Connection status card
-            HStack {
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 16) {
+                // Connection status card
+                HStack {
                 ZStack {
                     Circle()
                         .fill(isConnected ? Color.green.opacity(0.2) : Color.secondary.opacity(0.1))
@@ -350,6 +345,15 @@ struct StatusView: View {
         }
         .padding()
         .frame(width: 280)
+
+            // Debug watermark
+            #if DEBUG
+            Text("DEBUG")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.red.opacity(0.5))
+                .padding(4)
+            #endif
+        }
     }
 }
 
@@ -446,7 +450,8 @@ final class PairingManager: ObservableObject {
 
     private func generateKey() -> Data {
         var bytes = [UInt8](repeating: 0, count: Self.keySize)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(status == errSecSuccess, "Failed to generate secure pairing key")
         return Data(bytes)
     }
 
