@@ -16,39 +16,31 @@ final class MouseControllerTests: XCTestCase {
     }
 
     // MARK: - Special Key Code Tests
-    // Note: These test the internal logic without triggering actual key events
+    // These exercise MouseController.specialKeyCode directly rather than a copy.
 
     func testBackspaceCharacterRecognition() {
-        // DEL character (0x7F) should be recognized as backspace
-        let delChar: Character = "\u{7F}"
-        XCTAssertTrue(isSpecialKey(delChar))
-
-        // BS character (0x08) should also be recognized
-        let bsChar: Character = "\u{08}"
-        XCTAssertTrue(isSpecialKey(bsChar))
+        // DEL character (0x7F) and BS character (0x08) map to Backspace (0x33)
+        XCTAssertEqual(controller.specialKeyCode(for: "\u{7F}"), 0x33)
+        XCTAssertEqual(controller.specialKeyCode(for: "\u{08}"), 0x33)
     }
 
     func testEnterCharacterRecognition() {
-        let newline: Character = "\n"
-        let carriageReturn: Character = "\r"
-        XCTAssertTrue(isSpecialKey(newline))
-        XCTAssertTrue(isSpecialKey(carriageReturn))
+        XCTAssertEqual(controller.specialKeyCode(for: "\n"), 0x24)
+        XCTAssertEqual(controller.specialKeyCode(for: "\r"), 0x24)
     }
 
     func testTabCharacterRecognition() {
-        let tab: Character = "\t"
-        XCTAssertTrue(isSpecialKey(tab))
+        XCTAssertEqual(controller.specialKeyCode(for: "\t"), 0x30)
     }
 
     func testEscapeCharacterRecognition() {
-        let escape: Character = "\u{1B}"
-        XCTAssertTrue(isSpecialKey(escape))
+        XCTAssertEqual(controller.specialKeyCode(for: "\u{1B}"), 0x35)
     }
 
     func testRegularCharacterNotSpecial() {
         let regularChars: [Character] = ["a", "Z", "1", " ", "!", "あ"]
         for char in regularChars {
-            XCTAssertFalse(isSpecialKey(char), "Character '\(char)' should not be special")
+            XCTAssertNil(controller.specialKeyCode(for: char), "Character '\(char)' should not be special")
         }
     }
 
@@ -56,53 +48,136 @@ final class MouseControllerTests: XCTestCase {
 
     func testArrowKeyCodes() {
         // These are the standard macOS virtual key codes for arrows
-        XCTAssertEqual(leftArrowKeyCode, 0x7B)
-        XCTAssertEqual(rightArrowKeyCode, 0x7C)
-        XCTAssertEqual(downArrowKeyCode, 0x7D)
-        XCTAssertEqual(upArrowKeyCode, 0x7E)
+        XCTAssertEqual(MouseController.KeyCode.leftArrow, 0x7B)
+        XCTAssertEqual(MouseController.KeyCode.rightArrow, 0x7C)
+        XCTAssertEqual(MouseController.KeyCode.downArrow, 0x7D)
+        XCTAssertEqual(MouseController.KeyCode.upArrow, 0x7E)
     }
 
     func testArrowKeyCodesAreInSet() {
-        let arrowCodes: Set<UInt16> = [0x7B, 0x7C, 0x7D, 0x7E]
-        XCTAssertTrue(arrowCodes.contains(leftArrowKeyCode))
-        XCTAssertTrue(arrowCodes.contains(rightArrowKeyCode))
-        XCTAssertTrue(arrowCodes.contains(downArrowKeyCode))
-        XCTAssertTrue(arrowCodes.contains(upArrowKeyCode))
+        XCTAssertTrue(controller.arrowKeyCodes.contains(MouseController.KeyCode.leftArrow))
+        XCTAssertTrue(controller.arrowKeyCodes.contains(MouseController.KeyCode.rightArrow))
+        XCTAssertTrue(controller.arrowKeyCodes.contains(MouseController.KeyCode.downArrow))
+        XCTAssertTrue(controller.arrowKeyCodes.contains(MouseController.KeyCode.upArrow))
     }
 
     // MARK: - Modifier Key Code Tests
 
     func testModifierKeyCodes() {
-        XCTAssertEqual(controlKeyCode, 0x3B)
-        XCTAssertEqual(shiftKeyCode, 0x38)
-        XCTAssertEqual(optionKeyCode, 0x3A)
-        XCTAssertEqual(commandKeyCode, 0x37)
+        XCTAssertEqual(MouseController.KeyCode.control, 0x3B)
+        XCTAssertEqual(MouseController.KeyCode.shift, 0x38)
+        XCTAssertEqual(MouseController.KeyCode.option, 0x3A)
+        XCTAssertEqual(MouseController.KeyCode.command, 0x37)
+    }
+}
+
+// MARK: - Session Release
+
+final class MouseControllerSessionReleaseTests: XCTestCase {
+    private struct Posted: Equatable {
+        let type: CGEventType
+        let keyCode: Int64
     }
 
-    // MARK: - Helper Properties (for testing internal logic)
-    // These mirror the internal values for testing purposes
+    private final class Recorder {
+        private let lock = NSLock()
+        private var storage: [Posted] = []
 
-    private let leftArrowKeyCode: UInt16 = 0x7B
-    private let rightArrowKeyCode: UInt16 = 0x7C
-    private let downArrowKeyCode: UInt16 = 0x7D
-    private let upArrowKeyCode: UInt16 = 0x7E
-    private let controlKeyCode: UInt16 = 0x3B
-    private let shiftKeyCode: UInt16 = 0x38
-    private let optionKeyCode: UInt16 = 0x3A
-    private let commandKeyCode: UInt16 = 0x37
-
-    private func isSpecialKey(_ char: Character) -> Bool {
-        switch char {
-        case "\u{7F}", "\u{08}":  // DEL, BS -> Backspace
-            return true
-        case "\n", "\r":          // Enter/Return
-            return true
-        case "\t":                // Tab
-            return true
-        case "\u{1B}":            // Escape
-            return true
-        default:
-            return false
+        var events: [Posted] {
+            lock.lock(); defer { lock.unlock() }
+            return storage
         }
+
+        func record(_ event: CGEvent) {
+            lock.lock(); defer { lock.unlock() }
+            storage.append(Posted(type: event.type, keyCode: event.getIntegerValueField(.keyboardEventKeycode)))
+        }
+    }
+
+    private var recorder: Recorder!
+    private var controller: MouseController!
+
+    override func setUp() {
+        super.setUp()
+        let recorder = Recorder()
+        self.recorder = recorder
+        controller = MouseController(postEvent: { event, _ in recorder.record(event) })
+    }
+
+    override func tearDown() {
+        controller = nil
+        recorder = nil
+        super.tearDown()
+    }
+
+    private func count(_ type: CGEventType, keyCode: Int64? = nil) -> Int {
+        recorder.events.filter { $0.type == type && (keyCode == nil || $0.keyCode == keyCode) }.count
+    }
+
+    func testReleaseLiftsHeldLeftButton() {
+        controller.click(button: .left, action: .down)
+        controller.waitForScheduledEvents()
+
+        controller.releaseAllInput()
+        controller.waitForScheduledEvents()
+
+        XCTAssertEqual(recorder.events.map(\.type), [.leftMouseDown, .leftMouseUp])
+    }
+
+    func testReleaseLiftsHeldKeyAndModifiers() {
+        controller.sendKey(keyCode: 0x00, modifiers: [.command, .shift], isDown: true)
+        controller.waitForScheduledEvents()
+        let before = recorder.events.count
+
+        controller.releaseAllInput()
+        controller.waitForScheduledEvents()
+
+        let released = recorder.events.dropFirst(before)
+        XCTAssertEqual(released.first, Posted(type: .keyUp, keyCode: 0x00))
+        // Then one release per held modifier, by virtual key code.
+        XCTAssertEqual(
+            Set(released.dropFirst().map(\.keyCode)),
+            [Int64(MouseController.KeyCode.command), Int64(MouseController.KeyCode.shift)]
+        )
+        XCTAssertEqual(released.count, 3)
+    }
+
+    func testReleaseWithNothingHeldPostsNothing() {
+        controller.click(button: .right, action: .click)
+        controller.sendKey(keyCode: 0x00, modifiers: [], isDown: true)
+        controller.sendKey(keyCode: 0x00, modifiers: [], isDown: false)
+        controller.waitForScheduledEvents()
+        let before = recorder.events.count
+
+        controller.releaseAllInput()
+        controller.waitForScheduledEvents()
+
+        XCTAssertEqual(recorder.events.count, before)
+    }
+
+    func testReleaseDropsQueuedTextFromEndedSession() {
+        let text = String(repeating: "a", count: 200)
+        controller.typeText(text)
+        controller.releaseAllInput()
+        controller.waitForScheduledEvents()
+
+        // 200 characters are spaced 5 ms apart, so most were still queued.
+        XCTAssertLessThan(count(.keyDown), text.count)
+    }
+
+    func testReleaseDuringSynthesizedClickLeavesButtonsBalanced() {
+        controller.click(button: .left, action: .click)
+        controller.releaseAllInput()
+        controller.waitForScheduledEvents()
+
+        XCTAssertEqual(count(.leftMouseDown), count(.leftMouseUp))
+    }
+
+    func testInputAfterReleaseIsDelivered() {
+        controller.releaseAllInput()
+        controller.click(button: .left, action: .click)
+        controller.waitForScheduledEvents()
+
+        XCTAssertEqual(recorder.events.map(\.type), [.leftMouseDown, .leftMouseUp])
     }
 }

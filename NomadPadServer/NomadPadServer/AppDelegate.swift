@@ -1,7 +1,9 @@
 import AppKit
+import Combine
 import SwiftUI
 import Network
 import Security
+import Sparkle
 import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -9,15 +11,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var networkServer: NetworkServer?
     private var mouseController: MouseController?
+    private var updaterController: SPUStandardUpdaterController?
 
-    // Connection state for UI updates
-    @Published var isConnected = false
-    @Published var connectedClientName = "Not connected"
-    @Published var connectedAt: Date?
+    // Connection and listener state for UI updates. The popover observes this
+    // model directly, so it is created once rather than rebuilt on each change.
+    private let statusModel = ServerStatusModel()
 
-    private let pairingManager = PairingManager.shared
+    private lazy var pairingManager = PairingManager.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            return
+        }
+
+        setupUpdater()
         setupMenuBar()
         setupServer()
         checkAccessibilityPermission()
@@ -29,56 +36,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        updateMenuBarIcon(connected: false)
+        updateMenuBarIcon()
 
         if let button = statusItem?.button {
             button.action = #selector(togglePopover)
             button.target = self
         }
 
-        updatePopover()
+        setupPopover()
     }
 
-    private func updateMenuBarIcon(connected: Bool) {
+    private func setupUpdater() {
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }
+
+    private func updateMenuBarIcon() {
         guard let button = statusItem?.button else { return }
+
+        let connected = statusModel.isConnected
+        let listenerFailed: Bool
+        if case .failed = statusModel.listenerState {
+            listenerFailed = true
+        } else {
+            listenerFailed = false
+        }
 
         let symbolName = connected ? "hand.point.up.left.fill" : "hand.point.up.left"
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "NomadPad")
 
-        // Tint the icon based on connection state
+        // Tint the icon to reflect state: green when connected, red when the
+        // listener has failed, template (default) while idle.
         if connected {
             image?.isTemplate = false
-            if let tintedImage = image?.tinted(with: .systemGreen) {
-                button.image = tintedImage
-            } else {
-                button.image = image
-            }
+            button.image = image?.tinted(with: .systemGreen) ?? image
+        } else if listenerFailed {
+            image?.isTemplate = false
+            button.image = image?.tinted(with: .systemRed) ?? image
         } else {
             image?.isTemplate = true
             button.image = image
         }
     }
 
-    private func updatePopover() {
+    private func setupPopover() {
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 300, height: 400)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: StatusView(
-                isConnected: Binding(
-                    get: { [weak self] in self?.isConnected ?? false },
-                    set: { _ in }
-                ),
-                clientName: Binding(
-                    get: { [weak self] in self?.connectedClientName ?? "Not connected" },
-                    set: { _ in }
-                ),
-                connectedAt: Binding(
-                    get: { [weak self] in self?.connectedAt },
-                    set: { _ in }
-                ),
+                model: statusModel,
                 pairingManager: pairingManager,
                 onDisconnect: { [weak self] in self?.disconnectClient() },
+                onCheckForUpdates: { [weak self] in self?.checkForUpdates() },
                 onQuit: { [weak self] in self?.quit() }
             )
         )
@@ -86,7 +99,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupServer() {
-        mouseController = MouseController()
+        let mouseController = MouseController()
+        self.mouseController = mouseController
+        mouseController.onVolumeStatusChanged = { [weak self] volume, muted in
+            self?.networkServer?.sendMessage(VolumeStatusMessage(value: volume, muted: muted))
+        }
+        mouseController.startVolumeMonitoring()
         networkServer = NetworkServer(pairingKeyProvider: { [weak self] in
             self?.pairingManager.pairingKey ?? Data()
         })
@@ -94,9 +112,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         networkServer?.onMessageReceived = { [weak self] message in
             self?.handleMessage(message)
         }
+        networkServer?.connectionApprovalHandler = { [weak self] request, completion in
+            self?.presentConnectionApproval(request, completion: completion)
+        }
+        networkServer?.onListenerStateChanged = { [weak self] state in
+            guard let self = self else { return }
+            self.statusModel.listenerState = state
+            self.updateMenuBarIcon()
+        }
         pairingManager.onPairingReset = { [weak self] in
             guard let self = self else { return }
             self.networkServer?.stop()
+            self.mouseController?.releaseAllInput()
+            self.updateConnectionState(connected: false)
             self.networkServer?.start()
         }
         networkServer?.start()
@@ -112,12 +140,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             mouseController?.click(button: click.button, action: click.action)
         case let scroll as ScrollMessage:
             mouseController?.scroll(deltaX: CGFloat(scroll.deltaX), deltaY: CGFloat(scroll.deltaY))
+        case let scroll as ModifiedScrollMessage:
+            mouseController?.scroll(
+                deltaX: CGFloat(scroll.deltaX),
+                deltaY: CGFloat(scroll.deltaY),
+                modifiers: scroll.modifiers
+            )
+        case let volume as VolumeMessage:
+            mouseController?.adjustVolume(delta: CGFloat(volume.delta))
         case let key as KeyMessage:
             mouseController?.sendKey(keyCode: key.keyCode, modifiers: key.modifiers, isDown: key.isDown)
         case let text as TextMessage:
             mouseController?.typeText(text.text)
+        case let volume as VolumeSetMessage:
+            mouseController?.setVolume(volume.value)
+        case let brightness as BrightnessSetMessage:
+            mouseController?.setBrightness(brightness.value)
+        case is MuteToggleMessage:
+            mouseController?.toggleMute()
+        case let media as MediaCommandMessage:
+            mouseController?.sendMediaCommand(media.command)
+        case is SleepCommandMessage:
+            mouseController?.sleepSystem()
         default:
             break
+        }
+    }
+
+    // Pushes the current volume and brightness to a freshly connected client so
+    // its controls start in sync. Brightness is omitted when unavailable so the
+    // Remote can hide that control.
+    private func sendCurrentSystemStatus() {
+        if let status = mouseController?.currentVolumeStatus() {
+            networkServer?.sendMessage(VolumeStatusMessage(value: status.volume, muted: status.muted))
+        }
+        if let brightness = mouseController?.currentBrightness() {
+            networkServer?.sendMessage(BrightnessStatusMessage(value: brightness))
         }
     }
 
@@ -130,12 +188,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateConnectionState(connected: Bool, clientName: String? = nil, connectedAt: Date? = nil) {
-        self.isConnected = connected
-        self.connectedClientName = clientName ?? "Not connected"
-        self.connectedAt = connectedAt
+        statusModel.isConnected = connected
+        statusModel.clientName = clientName ?? "Not connected"
+        statusModel.connectedAt = connectedAt
 
-        updateMenuBarIcon(connected: connected)
-        updatePopover()
+        updateMenuBarIcon()
     }
 
     // MARK: - Accessibility
@@ -170,6 +227,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Connection Approval
+
+    private func presentConnectionApproval(
+        _ request: ConnectionApprovalRequest,
+        completion: @escaping (Bool) -> Void
+    ) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "Allow \(request.deviceName) to connect?"
+        alert.informativeText = request.hasDeviceToken
+            ? "This device is asking to control this Mac. Approve it only if you started the connection. Approved devices reconnect automatically."
+            : "This device is asking to control this Mac. It cannot be remembered, so you will be asked every time it connects."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Deny")
+
+        let approved = alert.runModal() == .alertFirstButtonReturn
+        completion(approved)
+    }
+
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
@@ -190,16 +268,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         networkServer?.stop()
         NSApplication.shared.terminate(nil)
     }
+
+    private func checkForUpdates() {
+        updaterController?.checkForUpdates(nil)
+    }
 }
 
 // MARK: - NetworkServerDelegate
 
 extension AppDelegate: NetworkServerDelegate {
+    func networkServerWillStartSession(_ server: NetworkServer) {
+        // A reconnect from the same device replaces the old slot without a
+        // disconnect callback, so start every session from a released state.
+        mouseController?.releaseAllInput()
+    }
+
     func networkServer(_ server: NetworkServer, clientDidConnect client: ConnectedClientInfo) {
         updateConnectionState(connected: true, clientName: client.deviceName, connectedAt: client.connectedAt)
+        sendCurrentSystemStatus()
     }
 
     func networkServer(_ server: NetworkServer, clientDidDisconnect deviceName: String, reason: DisconnectReason) {
+        mouseController?.releaseAllInput()
         updateConnectionState(connected: false)
 
         // Show notification for unexpected disconnections
@@ -228,19 +318,38 @@ extension AppDelegate: NetworkServerDelegate {
 
 // MARK: - Status View
 
+final class ServerStatusModel: ObservableObject {
+    @Published var isConnected = false
+    @Published var clientName = "Not connected"
+    @Published var connectedAt: Date?
+    @Published var listenerState: ServerListenerState = .starting
+}
+
 struct StatusView: View {
-    @Binding var isConnected: Bool
-    @Binding var clientName: String
-    @Binding var connectedAt: Date?
+    @ObservedObject var model: ServerStatusModel
     @ObservedObject var pairingManager: PairingManager
     let onDisconnect: () -> Void
+    let onCheckForUpdates: () -> Void
     let onQuit: () -> Void
 
     @State private var timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var isAccessibilityTrusted = AXIsProcessTrusted()
+    @State private var now = Date()
+
+    private var isConnected: Bool { model.isConnected }
+    private var clientName: String { model.clientName }
+    private var connectedAt: Date? { model.connectedAt }
+
+    private var listenerErrorMessage: String? {
+        if case .failed(let message) = model.listenerState {
+            return message
+        }
+        return nil
+    }
 
     private var connectionDuration: String {
         guard let connectedAt = connectedAt else { return "" }
-        let interval = Date().timeIntervalSince(connectedAt)
+        let interval = now.timeIntervalSince(connectedAt)
         let minutes = Int(interval) / 60
         let seconds = Int(interval) % 60
         return String(format: "%d:%02d", minutes, seconds)
@@ -279,7 +388,84 @@ struct StatusView: View {
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(10)
             .onReceive(timer) { _ in
-                // Force view update for connection duration
+                // Advancing `now` redraws the connection duration. Rechecking
+                // picks up a permission change made while the popover is open.
+                now = Date()
+                isAccessibilityTrusted = AXIsProcessTrusted()
+            }
+
+            // Listener failure banner
+            if let listenerErrorMessage = listenerErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Server not accepting connections")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text(listenerErrorMessage)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity)
+                .background(Color.orange.opacity(0.12))
+                .cornerRadius(8)
+            }
+
+            // Keychain write failure banner
+            if let keychainError = pairingManager.keychainErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Pairing key not saved")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text("The code may change after restart. \(keychainError)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity)
+                .background(Color.orange.opacity(0.12))
+                .cornerRadius(8)
+            }
+
+            // Accessibility banner. Without it macOS drops every posted event
+            // silently, so the controller looks connected but does nothing.
+            if !isAccessibilityTrusted {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Accessibility permission required")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text("Input from your iPhone is ignored until NomadPadServer is allowed in Privacy & Security > Accessibility.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Open System Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption2)
+                        .foregroundColor(.accentColor)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity)
+                .background(Color.orange.opacity(0.12))
+                .cornerRadius(8)
+                .accessibilityIdentifier("status.accessibilityWarning")
             }
 
             // Pairing QR code section
@@ -336,6 +522,11 @@ struct StatusView: View {
             }
 
             Spacer()
+
+            Button("Check for Updates...") {
+                onCheckForUpdates()
+            }
+            .buttonStyle(.bordered)
 
             // Quit button
             Button("Quit NomadPad") {
@@ -394,10 +585,15 @@ final class PairingManager: ObservableObject {
 
     @Published private(set) var displayCode: String = ""
     @Published private(set) var qrCodeImage: NSImage?
+    @Published private(set) var keychainErrorMessage: String?
     private(set) var pairingKey: Data = Data()
     var onPairingReset: (() -> Void)?
 
+    #if DEBUG
+    private let service = "com.nomadpad.pairing.debug"
+    #else
     private let service = "com.nomadpad.pairing"
+    #endif
     private let account = "psk"
 
     private init() {
@@ -405,14 +601,14 @@ final class PairingManager: ObservableObject {
             pairingKey = stored
         } else {
             pairingKey = generateKey()
-            save(pairingKey)
+            handleKeychainWriteStatus(save(pairingKey))
         }
         updateDisplayCode()
     }
 
     func regenerate() {
         pairingKey = generateKey()
-        save(pairingKey)
+        handleKeychainWriteStatus(save(pairingKey))
         updateDisplayCode()
         onPairingReset?()
     }
@@ -466,7 +662,7 @@ final class PairingManager: ObservableObject {
         return parts.joined(separator: "-")
     }
 
-    private func save(_ data: Data) {
+    private func save(_ data: Data) -> OSStatus {
         let query = keychainQuery()
         let attributes: [String: Any] = [
             kSecValueData as String: data,
@@ -474,13 +670,24 @@ final class PairingManager: ObservableObject {
         ]
 
         if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
-            SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            return SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         } else {
             var add = query
             add[kSecValueData as String] = data
             add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemAdd(add as CFDictionary, nil)
+            return SecItemAdd(add as CFDictionary, nil)
         }
+    }
+
+    private func handleKeychainWriteStatus(_ status: OSStatus) {
+        guard status != errSecSuccess else {
+            keychainErrorMessage = nil
+            return
+        }
+
+        let message = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
+        print("[PairingManager] Failed to store pairing key in keychain: \(message)")
+        keychainErrorMessage = message
     }
 
     private func load() -> Data? {

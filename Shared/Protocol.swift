@@ -1,5 +1,26 @@
 import Foundation
 
+private extension Data {
+    func readBigEndian<T: FixedWidthInteger>(at offset: Int, as type: T.Type) -> T? {
+        guard offset >= 0, count >= offset + MemoryLayout<T>.size else { return nil }
+        return withUnsafeBytes { bytes in
+            T(bigEndian: bytes.loadUnaligned(fromByteOffset: offset, as: type))
+        }
+    }
+}
+
+private extension String {
+    func utf8Prefix(maxByteCount: Int) -> Data {
+        var result = Data()
+        for character in self {
+            let characterData = Data(String(character).utf8)
+            guard result.count + characterData.count <= maxByteCount else { break }
+            result.append(characterData)
+        }
+        return result
+    }
+}
+
 // MARK: - Message Types
 enum MessageType: UInt8 {
     case mouseMove = 0x01
@@ -7,6 +28,24 @@ enum MessageType: UInt8 {
     case scroll = 0x03
     case key = 0x04
     case text = 0x05
+    case volume = 0x06
+    case modifiedScroll = 0x07
+    // v3.0 system integration (iOS -> Mac)
+    case volumeSet = 0x08
+    case brightnessSet = 0x09
+    case muteToggle = 0x0A
+    case mediaCommand = 0x0B
+    case sleepCommand = 0x0C
+    // v3.0 system integration (Mac -> iOS)
+    case volumeStatus = 0x0D
+    case brightnessStatus = 0x0E
+}
+
+// MARK: - Media Commands
+enum MediaCommand: UInt8 {
+    case playPause = 2
+    case next = 4
+    case previous = 5
 }
 
 // MARK: - Control Message Types (0xF0-0xFF)
@@ -76,8 +115,8 @@ struct MouseMoveMessage: RemoteMessage {
         guard data.count >= 5,
               data[0] == MessageType.mouseMove.rawValue else { return nil }
 
-        let deltaX = Int16(bigEndian: data.subdata(in: 1..<3).withUnsafeBytes { $0.load(as: Int16.self) })
-        let deltaY = Int16(bigEndian: data.subdata(in: 3..<5).withUnsafeBytes { $0.load(as: Int16.self) })
+        guard let deltaX = data.readBigEndian(at: 1, as: Int16.self),
+              let deltaY = data.readBigEndian(at: 3, as: Int16.self) else { return nil }
 
         return MouseMoveMessage(deltaX: deltaX, deltaY: deltaY)
     }
@@ -125,10 +164,38 @@ struct ScrollMessage: RemoteMessage {
         guard data.count >= 5,
               data[0] == MessageType.scroll.rawValue else { return nil }
 
-        let deltaX = Int16(bigEndian: data.subdata(in: 1..<3).withUnsafeBytes { $0.load(as: Int16.self) })
-        let deltaY = Int16(bigEndian: data.subdata(in: 3..<5).withUnsafeBytes { $0.load(as: Int16.self) })
+        guard let deltaX = data.readBigEndian(at: 1, as: Int16.self),
+              let deltaY = data.readBigEndian(at: 3, as: Int16.self) else { return nil }
 
         return ScrollMessage(deltaX: deltaX, deltaY: deltaY)
+    }
+}
+
+// MARK: - Modified Scroll Message
+struct ModifiedScrollMessage: RemoteMessage {
+    let type: MessageType = .modifiedScroll
+    let deltaX: Int16
+    let deltaY: Int16
+    let modifiers: ModifierFlags
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(contentsOf: withUnsafeBytes(of: deltaX.bigEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: deltaY.bigEndian) { Array($0) })
+        data.append(modifiers.rawValue)
+        return data
+    }
+
+    static func decode(from data: Data) -> ModifiedScrollMessage? {
+        guard data.count >= 6,
+              data[0] == MessageType.modifiedScroll.rawValue else { return nil }
+
+        guard let deltaX = data.readBigEndian(at: 1, as: Int16.self),
+              let deltaY = data.readBigEndian(at: 3, as: Int16.self) else { return nil }
+        let modifiers = ModifierFlags(rawValue: data[5])
+
+        return ModifiedScrollMessage(deltaX: deltaX, deltaY: deltaY, modifiers: modifiers)
     }
 }
 
@@ -152,7 +219,7 @@ struct KeyMessage: RemoteMessage {
         guard data.count >= 5,
               data[0] == MessageType.key.rawValue else { return nil }
 
-        let keyCode = UInt16(bigEndian: data.subdata(in: 1..<3).withUnsafeBytes { $0.load(as: UInt16.self) })
+        guard let keyCode = data.readBigEndian(at: 1, as: UInt16.self) else { return nil }
         let modifiers = ModifierFlags(rawValue: data[3])
         let isDown = data[4] == 1
 
@@ -170,9 +237,9 @@ struct TextMessage: RemoteMessage {
     func encode() -> Data {
         var data = Data()
         data.append(type.rawValue)
-        let textData = text.data(using: .utf8) ?? Data()
-        data.append(UInt8(min(textData.count, Self.maxLength)))
-        data.append(textData.prefix(Self.maxLength))
+        let textData = text.utf8Prefix(maxByteCount: Self.maxLength)
+        data.append(UInt8(textData.count))
+        data.append(textData)
         return data
     }
 
@@ -187,6 +254,205 @@ struct TextMessage: RemoteMessage {
         guard let text = String(data: textData, encoding: .utf8) else { return nil }
 
         return TextMessage(text: text)
+    }
+
+    /// Splits `text` into messages that each fit the wire limit, so long input
+    /// arrives in order without truncation. Chunks break between Characters;
+    /// only a single Character larger than the limit is split by scalar.
+    static func chunked(_ text: String) -> [TextMessage] {
+        var messages: [TextMessage] = []
+        var current = ""
+        var currentBytes = 0
+
+        func append(_ piece: String, bytes: Int) {
+            if currentBytes + bytes > maxLength {
+                messages.append(TextMessage(text: current))
+                current = ""
+                currentBytes = 0
+            }
+            current.append(piece)
+            currentBytes += bytes
+        }
+
+        for character in text {
+            let bytes = String(character).utf8.count
+            if bytes <= maxLength {
+                append(String(character), bytes: bytes)
+            } else {
+                for scalar in character.unicodeScalars {
+                    append(String(scalar), bytes: String(scalar).utf8.count)
+                }
+            }
+        }
+        if !current.isEmpty {
+            messages.append(TextMessage(text: current))
+        }
+        return messages
+    }
+}
+
+// MARK: - Volume Message
+struct VolumeMessage: RemoteMessage {
+    let type: MessageType = .volume
+    let delta: Int16
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(contentsOf: withUnsafeBytes(of: delta.bigEndian) { Array($0) })
+        return data
+    }
+
+    static func decode(from data: Data) -> VolumeMessage? {
+        guard data.count >= 3,
+              data[0] == MessageType.volume.rawValue else { return nil }
+
+        guard let delta = data.readBigEndian(at: 1, as: Int16.self) else { return nil }
+        return VolumeMessage(delta: delta)
+    }
+}
+
+// MARK: - Volume Set Message
+struct VolumeSetMessage: RemoteMessage {
+    let type: MessageType = .volumeSet
+    let value: Float
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(contentsOf: withUnsafeBytes(of: value.bitPattern.bigEndian) { Array($0) })
+        return data
+    }
+
+    static func decode(from data: Data) -> VolumeSetMessage? {
+        guard data.count >= 5,
+              data[0] == MessageType.volumeSet.rawValue,
+              let bits = data.readBigEndian(at: 1, as: UInt32.self) else { return nil }
+
+        return VolumeSetMessage(value: Float(bitPattern: bits))
+    }
+}
+
+// MARK: - Brightness Set Message
+struct BrightnessSetMessage: RemoteMessage {
+    let type: MessageType = .brightnessSet
+    let value: Float
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(contentsOf: withUnsafeBytes(of: value.bitPattern.bigEndian) { Array($0) })
+        return data
+    }
+
+    static func decode(from data: Data) -> BrightnessSetMessage? {
+        guard data.count >= 5,
+              data[0] == MessageType.brightnessSet.rawValue,
+              let bits = data.readBigEndian(at: 1, as: UInt32.self) else { return nil }
+
+        return BrightnessSetMessage(value: Float(bitPattern: bits))
+    }
+}
+
+// MARK: - Mute Toggle Message
+struct MuteToggleMessage: RemoteMessage {
+    let type: MessageType = .muteToggle
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        return data
+    }
+
+    static func decode(from data: Data) -> MuteToggleMessage? {
+        guard data.count >= 1,
+              data[0] == MessageType.muteToggle.rawValue else { return nil }
+
+        return MuteToggleMessage()
+    }
+}
+
+// MARK: - Media Command Message
+struct MediaCommandMessage: RemoteMessage {
+    let type: MessageType = .mediaCommand
+    let command: MediaCommand
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(command.rawValue)
+        return data
+    }
+
+    static func decode(from data: Data) -> MediaCommandMessage? {
+        guard data.count >= 2,
+              data[0] == MessageType.mediaCommand.rawValue,
+              let command = MediaCommand(rawValue: data[1]) else { return nil }
+
+        return MediaCommandMessage(command: command)
+    }
+}
+
+// MARK: - Sleep Command Message
+struct SleepCommandMessage: RemoteMessage {
+    let type: MessageType = .sleepCommand
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        return data
+    }
+
+    static func decode(from data: Data) -> SleepCommandMessage? {
+        guard data.count >= 1,
+              data[0] == MessageType.sleepCommand.rawValue else { return nil }
+
+        return SleepCommandMessage()
+    }
+}
+
+// MARK: - Volume Status Message
+struct VolumeStatusMessage: RemoteMessage {
+    let type: MessageType = .volumeStatus
+    let value: Float
+    let muted: Bool
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(contentsOf: withUnsafeBytes(of: value.bitPattern.bigEndian) { Array($0) })
+        data.append(muted ? 1 : 0)
+        return data
+    }
+
+    static func decode(from data: Data) -> VolumeStatusMessage? {
+        guard data.count >= 6,
+              data[0] == MessageType.volumeStatus.rawValue,
+              let bits = data.readBigEndian(at: 1, as: UInt32.self) else { return nil }
+        let muted = data[5] == 1
+
+        return VolumeStatusMessage(value: Float(bitPattern: bits), muted: muted)
+    }
+}
+
+// MARK: - Brightness Status Message
+struct BrightnessStatusMessage: RemoteMessage {
+    let type: MessageType = .brightnessStatus
+    let value: Float
+
+    func encode() -> Data {
+        var data = Data()
+        data.append(type.rawValue)
+        data.append(contentsOf: withUnsafeBytes(of: value.bitPattern.bigEndian) { Array($0) })
+        return data
+    }
+
+    static func decode(from data: Data) -> BrightnessStatusMessage? {
+        guard data.count >= 5,
+              data[0] == MessageType.brightnessStatus.rawValue,
+              let bits = data.readBigEndian(at: 1, as: UInt32.self) else { return nil }
+
+        return BrightnessStatusMessage(value: Float(bitPattern: bits))
     }
 }
 
@@ -207,12 +473,31 @@ struct MessageDecoder {
             return KeyMessage.decode(from: data)
         case .text:
             return TextMessage.decode(from: data)
+        case .volume:
+            return VolumeMessage.decode(from: data)
+        case .modifiedScroll:
+            return ModifiedScrollMessage.decode(from: data)
+        case .volumeSet:
+            return VolumeSetMessage.decode(from: data)
+        case .brightnessSet:
+            return BrightnessSetMessage.decode(from: data)
+        case .muteToggle:
+            return MuteToggleMessage.decode(from: data)
+        case .mediaCommand:
+            return MediaCommandMessage.decode(from: data)
+        case .sleepCommand:
+            return SleepCommandMessage.decode(from: data)
+        case .volumeStatus:
+            return VolumeStatusMessage.decode(from: data)
+        case .brightnessStatus:
+            return BrightnessStatusMessage.decode(from: data)
         }
     }
 }
 
 // MARK: - Service Constants
 enum ServiceConstants {
+    // Kept for compatibility with released Server and Remote builds.
     static let serviceType = "_deskpad._tcp"
     static let serviceDomain = "local."
     static let defaultPort: UInt16 = 54321
@@ -230,13 +515,16 @@ struct ConnectionRequestMessage: ControlMessage {
     let controlType: ControlMessageType = .connectionRequest
     let deviceName: String
     let deviceId: String
+    let deviceToken: String
 
     static let maxNameLength = 64
     static let deviceIdLength = 36 // UUID string length
+    static let deviceTokenLength = 64 // 32 random bytes encoded as hex
 
-    init(deviceName: String, deviceId: String) {
+    init(deviceName: String, deviceId: String, deviceToken: String = "") {
         self.deviceName = deviceName
         self.deviceId = deviceId
+        self.deviceToken = deviceToken
     }
 
     func encode() -> Data {
@@ -244,13 +532,17 @@ struct ConnectionRequestMessage: ControlMessage {
         data.append(controlType.rawValue)
 
         // Device name (length prefix + UTF8)
-        let nameData = deviceName.data(using: .utf8) ?? Data()
-        data.append(UInt8(min(nameData.count, Self.maxNameLength)))
-        data.append(nameData.prefix(Self.maxNameLength))
+        let nameData = deviceName.utf8Prefix(maxByteCount: Self.maxNameLength)
+        data.append(UInt8(nameData.count))
+        data.append(nameData)
 
         // Device ID (fixed length UUID)
         let idData = deviceId.data(using: .utf8) ?? Data()
         data.append(idData.prefix(Self.deviceIdLength))
+
+        // Device token (fixed length hex string)
+        let tokenData = deviceToken.data(using: .utf8) ?? Data()
+        data.append(tokenData.prefix(Self.deviceTokenLength))
 
         return data
     }
@@ -260,7 +552,8 @@ struct ConnectionRequestMessage: ControlMessage {
               data[0] == ControlMessageType.connectionRequest.rawValue else { return nil }
 
         let nameLength = Int(data[1])
-        guard data.count >= 2 + nameLength + Self.deviceIdLength else { return nil }
+        guard nameLength <= Self.maxNameLength,
+              data.count >= 2 + nameLength + Self.deviceIdLength else { return nil }
 
         let nameData = data.subdata(in: 2..<(2 + nameLength))
         guard let deviceName = String(data: nameData, encoding: .utf8) else { return nil }
@@ -269,7 +562,18 @@ struct ConnectionRequestMessage: ControlMessage {
         let idData = data.subdata(in: idStart..<(idStart + Self.deviceIdLength))
         guard let deviceId = String(data: idData, encoding: .utf8) else { return nil }
 
-        return ConnectionRequestMessage(deviceName: deviceName, deviceId: deviceId)
+        let tokenStart = idStart + Self.deviceIdLength
+        let deviceToken: String
+        if data.count >= tokenStart + Self.deviceTokenLength {
+            let tokenData = data.subdata(in: tokenStart..<(tokenStart + Self.deviceTokenLength))
+            guard let decodedToken = String(data: tokenData, encoding: .utf8) else { return nil }
+            deviceToken = decodedToken
+        } else {
+            // Released clients did not include a device token.
+            deviceToken = ""
+        }
+
+        return ConnectionRequestMessage(deviceName: deviceName, deviceId: deviceId, deviceToken: deviceToken)
     }
 }
 
@@ -320,7 +624,7 @@ struct HeartbeatMessage: ControlMessage {
         guard data.count >= 5,
               data[0] == ControlMessageType.heartbeat.rawValue else { return nil }
 
-        let timestamp = UInt32(bigEndian: data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: UInt32.self) })
+        guard let timestamp = data.readBigEndian(at: 1, as: UInt32.self) else { return nil }
         return HeartbeatMessage(timestamp: timestamp)
     }
 }
@@ -341,7 +645,7 @@ struct HeartbeatAckMessage: ControlMessage {
         guard data.count >= 5,
               data[0] == ControlMessageType.heartbeatAck.rawValue else { return nil }
 
-        let timestamp = UInt32(bigEndian: data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: UInt32.self) })
+        guard let timestamp = data.readBigEndian(at: 1, as: UInt32.self) else { return nil }
         return HeartbeatAckMessage(timestamp: timestamp)
     }
 }

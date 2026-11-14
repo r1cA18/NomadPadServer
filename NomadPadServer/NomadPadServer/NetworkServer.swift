@@ -18,6 +18,14 @@ struct ControllerIdentity: Equatable {
     let deviceToken: String
 }
 
+// Details presented to the user when a new device asks to connect for the
+// first time.
+struct ConnectionApprovalRequest {
+    let deviceName: String
+    let deviceId: String
+    let hasDeviceToken: Bool
+}
+
 enum ConnectionAdmissionDecision: Equatable {
     case approveNew
     case replaceExisting
@@ -32,8 +40,19 @@ enum ConnectionAdmissionDecision: Equatable {
     }
 }
 
+// Lifecycle state of the Bonjour/TCP listener, surfaced to the UI so a
+// failure to accept connections is visible instead of silent.
+enum ServerListenerState: Equatable {
+    case starting
+    case running
+    case failed(String)
+}
+
 // MARK: - Network Server Delegate
 protocol NetworkServerDelegate: AnyObject {
+    // Posted to main before the new session can deliver any input, so work
+    // done here is ordered ahead of that session's first message.
+    func networkServerWillStartSession(_ server: NetworkServer)
     func networkServer(_ server: NetworkServer, clientDidConnect client: ConnectedClientInfo)
     func networkServer(_ server: NetworkServer, clientDidDisconnect deviceName: String, reason: DisconnectReason)
 }
@@ -41,7 +60,7 @@ protocol NetworkServerDelegate: AnyObject {
 class NetworkServer {
     private var listener: NWListener?
     private var connectedClients: [String: ConnectedClientInfo] = [:] // deviceId -> info
-    private let queue = DispatchQueue(label: "com.deskpad.server", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "com.r1ca18.nomadpad.server", qos: .userInteractive)
     private let queueKey = DispatchSpecificKey<Void>()
     private let pairingKeyProvider: () -> Data
     private var receiveBuffers: [ObjectIdentifier: Data] = [:]
@@ -56,13 +75,20 @@ class NetworkServer {
     weak var delegate: NetworkServerDelegate?
     var onMessageReceived: ((any RemoteMessage) -> Void)?
 
-    var isClientConnected: Bool {
-        readOnQueue { !connectedClients.isEmpty }
-    }
+    // Invoked on the main thread when a device that has not been approved
+    // before requests a connection. The completion must be called with the
+    // user's decision.
+    var connectionApprovalHandler: ((ConnectionApprovalRequest, @escaping (Bool) -> Void) -> Void)?
 
-    var connectedClientName: String {
-        readOnQueue { connectedClients.values.first?.deviceName ?? "Not connected" }
-    }
+    // Invoked on the main thread whenever the listener's lifecycle state
+    // changes so the menu bar UI can reflect it.
+    var onListenerStateChanged: ((ServerListenerState) -> Void)?
+
+    // A device approval prompt is in flight. While set, further connection
+    // requests are denied so only one prompt can be pending at a time.
+    private var isAwaitingApproval = false
+
+    private let approvedTokensDefaultsKey = "com.r1ca18.nomadpad.approvedDeviceTokens"
 
     var connectedClientInfo: ConnectedClientInfo? {
         readOnQueue { connectedClients.values.first }
@@ -74,6 +100,7 @@ class NetworkServer {
     }
 
     func start() {
+        notifyListenerState(.starting)
         do {
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.noDelay = true
@@ -95,7 +122,12 @@ class NetworkServer {
 
             listener?.stateUpdateHandler = { [weak self] state in
                 switch state {
-                case .failed:
+                case .ready:
+                    self?.notifyListenerState(.running)
+                case .waiting(let error):
+                    self?.notifyListenerState(.failed(error.localizedDescription))
+                case .failed(let error):
+                    self?.notifyListenerState(.failed(error.localizedDescription))
                     self?.listener?.cancel()
                 default:
                     break
@@ -113,6 +145,13 @@ class NetworkServer {
 
         } catch {
             print("[NetworkServer] Failed to start: \(error.localizedDescription)")
+            notifyListenerState(.failed(error.localizedDescription))
+        }
+    }
+
+    private func notifyListenerState(_ state: ServerListenerState) {
+        notifyOnMain { [weak self] in
+            self?.onListenerStateChanged?(state)
         }
     }
 
@@ -146,16 +185,6 @@ class NetworkServer {
     func disconnectClient(deviceId: String, reason: DisconnectReason = .userRequested) {
         runOnQueue { [weak self] in
             self?.disconnectClientOnQueue(deviceId: deviceId, reason: reason)
-        }
-    }
-
-    func disconnectAllClients(reason: DisconnectReason = .serverClosed) {
-        runOnQueue { [weak self] in
-            guard let self = self else { return }
-            let clientIds = Array(self.connectedClients.keys)
-            for deviceId in clientIds {
-                self.disconnectClientOnQueue(deviceId: deviceId, reason: reason)
-            }
         }
     }
 
@@ -255,7 +284,9 @@ class NetworkServer {
 
         let headerSize = 4
         while buffer.count >= headerSize {
-            let length = buffer.prefix(headerSize).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let length = buffer.withUnsafeBytes {
+                $0.loadUnaligned(as: UInt32.self).bigEndian
+            }
             if length == 0 || length > UInt32(maxFrameSize) {
                 connection.cancel()
                 receiveBuffers[key] = Data()
@@ -319,10 +350,23 @@ class NetworkServer {
             ControllerIdentity(deviceId: $0.deviceId, deviceToken: $0.deviceToken)
         }
 
+        // A prompt for another device is already open. Deny the request instead
+        // of opening a second, competing prompt.
+        if isAwaitingApproval {
+            print("[NetworkServer] Denying controller while an approval prompt is pending: \(request.deviceName)")
+            denyConnectionRequest(on: connection)
+            return
+        }
+
         switch ConnectionAdmissionDecision.resolve(request: requestIdentity, active: activeIdentity) {
         case .approveNew:
-            print("[NetworkServer] PSK validated, approving controller: \(request.deviceName)")
-            approveConnectionRequest(request, on: connection, replacing: nil)
+            if isApprovedDevice(token: request.deviceToken) {
+                print("[NetworkServer] TLS handshake authenticated known controller, approving: \(request.deviceName)")
+                approveConnectionRequest(request, on: connection, replacing: nil)
+            } else {
+                print("[NetworkServer] TLS handshake authenticated new controller, requesting user approval: \(request.deviceName)")
+                requestUserApproval(request, on: connection, replacing: nil)
+            }
         case .replaceExisting:
             guard let activeClient else {
                 approveConnectionRequest(request, on: connection, replacing: nil)
@@ -350,18 +394,31 @@ class NetworkServer {
             lastHeartbeat: Date()
         )
 
+        // Input is forwarded to main only after the slot below is reserved, so
+        // posting this first keeps it ahead of the new session's input.
+        notifyOnMain { [weak self] in
+            guard let self else { return }
+            self.delegate?.networkServerWillStartSession(self)
+        }
+
+        // Reserve the single active slot synchronously on the serial queue.
+        // Doing this before the response is sent prevents a second connection
+        // request processed in between from also being admitted.
+        if let previousClient {
+            connectedClients.removeValue(forKey: previousClient.deviceId)
+        }
+        connectedClients = [request.deviceId: clientInfo]
+
         let response = ConnectionResponseMessage(approved: true)
         sendControlMessage(response, to: connection) { [weak self] error in
             guard let self else { return }
             guard error == nil else {
+                // Roll back the reservation if the approval could not be delivered.
+                self.connectedClients.removeValue(forKey: request.deviceId)
                 connection.cancel()
                 return
             }
 
-            if let previousClient {
-                self.connectedClients.removeValue(forKey: previousClient.deviceId)
-            }
-            self.connectedClients = [request.deviceId: clientInfo]
             previousClient?.connection.cancel()
 
             print("[NetworkServer] Approved connection from: \(request.deviceName)")
@@ -380,6 +437,67 @@ class NetworkServer {
                 connection.cancel()
             }
         }
+    }
+
+    // MARK: - First-time Device Approval
+
+    private func requestUserApproval(
+        _ request: ConnectionRequestMessage,
+        on connection: NWConnection,
+        replacing previousClient: ConnectedClientInfo?
+    ) {
+        guard let approvalHandler = connectionApprovalHandler else {
+            // No approval UI is wired up. The TLS PSK already gates access, so
+            // fall back to admitting the controller rather than locking out.
+            print("[NetworkServer] No approval handler set, admitting controller: \(request.deviceName)")
+            rememberDevice(token: request.deviceToken)
+            approveConnectionRequest(request, on: connection, replacing: previousClient)
+            return
+        }
+
+        isAwaitingApproval = true
+        let approvalRequest = ConnectionApprovalRequest(
+            deviceName: request.deviceName,
+            deviceId: request.deviceId,
+            hasDeviceToken: !request.deviceToken.isEmpty
+        )
+
+        notifyOnMain { [weak self] in
+            approvalHandler(approvalRequest) { approved in
+                self?.runOnQueue {
+                    guard let self else { return }
+                    self.isAwaitingApproval = false
+
+                    if approved {
+                        self.rememberDevice(token: request.deviceToken)
+                        self.approveConnectionRequest(request, on: connection, replacing: previousClient)
+                    } else {
+                        print("[NetworkServer] User denied controller: \(request.deviceName)")
+                        self.denyConnectionRequest(on: connection)
+                    }
+                }
+            }
+        }
+    }
+
+    private func isApprovedDevice(token: String) -> Bool {
+        guard !token.isEmpty else { return false }
+        return approvedTokens().contains(token)
+    }
+
+    private func rememberDevice(token: String) {
+        // Legacy clients send no token and cannot be remembered, so they are
+        // prompted on every connection.
+        guard !token.isEmpty else { return }
+        var tokens = approvedTokens()
+        guard !tokens.contains(token) else { return }
+        tokens.insert(token)
+        UserDefaults.standard.set(Array(tokens), forKey: approvedTokensDefaultsKey)
+    }
+
+    private func approvedTokens() -> Set<String> {
+        let stored = UserDefaults.standard.stringArray(forKey: approvedTokensDefaultsKey) ?? []
+        return Set(stored)
     }
 
     // MARK: - Heartbeat
@@ -424,6 +542,15 @@ class NetworkServer {
 
     private func isApprovedConnection(_ connection: NWConnection) -> Bool {
         connectedClientEntry(for: connection) != nil
+    }
+
+    // Sends a data-plane message (e.g. volume/brightness status) to the single
+    // approved client. No-op when no client is connected.
+    func sendMessage(_ message: any RemoteMessage) {
+        runOnQueue { [weak self] in
+            guard let self, let client = self.connectedClients.values.first else { return }
+            self.sendFramed(message.encode(), to: client.connection) { _ in }
+        }
     }
 
     private func sendControlMessage(_ message: any ControlMessage, to connection: NWConnection) {

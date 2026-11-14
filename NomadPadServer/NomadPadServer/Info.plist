@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSMinimumSystemVersion</key>
@@ -34,5 +34,9 @@
 	<string>NomadPad needs local network access to communicate with your iPhone/iPad</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>NomadPad needs to control System Events for spaces switching and keyboard shortcuts</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/r1cA18/NomadPadServer/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>20vt5Im2Pobd0HTdwfQnFguUC94OsIQLPQTq/B3vrmk=</string>
 </dict>
 </plist>

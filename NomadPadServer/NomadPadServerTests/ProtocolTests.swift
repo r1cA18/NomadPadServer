@@ -89,6 +89,118 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(decoded?.deltaY, 32767)
     }
 
+    // MARK: - ModifiedScrollMessage Tests
+
+    func testModifiedScrollMessageEncodeDecodeRoundTrip() {
+        let original = ModifiedScrollMessage(deltaX: -8, deltaY: 40, modifiers: [.command, .shift])
+        let decoded = ModifiedScrollMessage.decode(from: original.encode())
+
+        XCTAssertEqual(decoded?.deltaX, -8)
+        XCTAssertEqual(decoded?.deltaY, 40)
+        XCTAssertTrue(decoded?.modifiers.contains(.command) ?? false)
+        XCTAssertTrue(decoded?.modifiers.contains(.shift) ?? false)
+    }
+
+    // MARK: - VolumeMessage Tests
+
+    func testVolumeMessageEncodeDecodeRoundTrip() {
+        let original = VolumeMessage(delta: 42)
+        let encoded = original.encode()
+        let decoded = VolumeMessage.decode(from: encoded)
+
+        XCTAssertNotNil(decoded)
+        XCTAssertEqual(decoded?.delta, 42)
+    }
+
+    func testVolumeMessageNegativeValue() {
+        let original = VolumeMessage(delta: -15)
+        let decoded = VolumeMessage.decode(from: original.encode())
+
+        XCTAssertEqual(decoded?.delta, -15)
+    }
+
+    // MARK: - v3.0 System Integration Messages
+
+    func testVolumeSetMessageEncodeDecodeRoundTrip() {
+        let original = VolumeSetMessage(value: 0.42)
+        let encoded = original.encode()
+        let decoded = VolumeSetMessage.decode(from: encoded)
+
+        XCTAssertEqual(encoded.count, 5)
+        XCTAssertEqual(encoded[0], MessageType.volumeSet.rawValue)
+        XCTAssertEqual(decoded?.value, 0.42)
+    }
+
+    func testVolumeSetMessageDecodeRejectsTruncatedPayload() {
+        XCTAssertNil(VolumeSetMessage.decode(from: Data([MessageType.volumeSet.rawValue, 0x00, 0x00])))
+        XCTAssertNil(VolumeSetMessage.decode(from: Data([MessageType.click.rawValue, 0x00, 0x00, 0x00, 0x00])))
+    }
+
+    func testBrightnessSetMessageEncodeDecodeRoundTrip() {
+        let original = BrightnessSetMessage(value: 0.75)
+        let decoded = BrightnessSetMessage.decode(from: original.encode())
+
+        XCTAssertEqual(decoded?.value, 0.75)
+    }
+
+    func testMuteToggleMessageEncodeDecodeRoundTrip() {
+        let encoded = MuteToggleMessage().encode()
+        XCTAssertEqual(encoded, Data([MessageType.muteToggle.rawValue]))
+        XCTAssertNotNil(MuteToggleMessage.decode(from: encoded))
+    }
+
+    func testMuteToggleMessageDecodeRejectsWrongType() {
+        XCTAssertNil(MuteToggleMessage.decode(from: Data([MessageType.sleepCommand.rawValue])))
+        XCTAssertNil(MuteToggleMessage.decode(from: Data()))
+    }
+
+    func testMediaCommandMessageEncodeDecodeRoundTrip() {
+        for command in [MediaCommand.playPause, .next, .previous] {
+            let decoded = MediaCommandMessage.decode(from: MediaCommandMessage(command: command).encode())
+            XCTAssertEqual(decoded?.command, command)
+        }
+    }
+
+    func testMediaCommandMessageDecodeRejectsUnknownCommand() {
+        XCTAssertNil(MediaCommandMessage.decode(from: Data([MessageType.mediaCommand.rawValue, 0x63])))
+        XCTAssertNil(MediaCommandMessage.decode(from: Data([MessageType.mediaCommand.rawValue])))
+    }
+
+    func testSleepCommandMessageEncodeDecodeRoundTrip() {
+        let encoded = SleepCommandMessage().encode()
+        XCTAssertEqual(encoded, Data([MessageType.sleepCommand.rawValue]))
+        XCTAssertNotNil(SleepCommandMessage.decode(from: encoded))
+    }
+
+    func testVolumeStatusMessageEncodeDecodeRoundTrip() {
+        let muted = VolumeStatusMessage.decode(from: VolumeStatusMessage(value: 0.3, muted: true).encode())
+        XCTAssertEqual(muted?.value, 0.3)
+        XCTAssertEqual(muted?.muted, true)
+
+        let unmuted = VolumeStatusMessage.decode(from: VolumeStatusMessage(value: 0.9, muted: false).encode())
+        XCTAssertEqual(unmuted?.value, 0.9)
+        XCTAssertEqual(unmuted?.muted, false)
+    }
+
+    func testVolumeStatusMessageDecodeRejectsTruncatedPayload() {
+        XCTAssertNil(VolumeStatusMessage.decode(from: Data([MessageType.volumeStatus.rawValue, 0x00, 0x00, 0x00, 0x00])))
+    }
+
+    func testBrightnessStatusMessageEncodeDecodeRoundTrip() {
+        let decoded = BrightnessStatusMessage.decode(from: BrightnessStatusMessage(value: 0.6).encode())
+        XCTAssertEqual(decoded?.value, 0.6)
+    }
+
+    func testMessageDecoderDispatchesV3Messages() {
+        XCTAssertTrue(MessageDecoder.decode(from: VolumeSetMessage(value: 0.5).encode()) is VolumeSetMessage)
+        XCTAssertTrue(MessageDecoder.decode(from: BrightnessSetMessage(value: 0.5).encode()) is BrightnessSetMessage)
+        XCTAssertTrue(MessageDecoder.decode(from: MuteToggleMessage().encode()) is MuteToggleMessage)
+        XCTAssertTrue(MessageDecoder.decode(from: MediaCommandMessage(command: .next).encode()) is MediaCommandMessage)
+        XCTAssertTrue(MessageDecoder.decode(from: SleepCommandMessage().encode()) is SleepCommandMessage)
+        XCTAssertTrue(MessageDecoder.decode(from: VolumeStatusMessage(value: 0.5, muted: false).encode()) is VolumeStatusMessage)
+        XCTAssertTrue(MessageDecoder.decode(from: BrightnessStatusMessage(value: 0.5).encode()) is BrightnessStatusMessage)
+    }
+
     // MARK: - KeyMessage Tests
 
     func testKeyMessageEncodeDecodeRoundTrip() {
@@ -151,6 +263,51 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(decoded?.text, "\u{7F}")
     }
 
+    func testTextMessageTruncatesUnicodeAtCharacterBoundary() {
+        let character = "👨‍👩‍👧‍👦"
+        let text = String(repeating: character, count: 20)
+        let decoded = TextMessage.decode(from: TextMessage(text: text).encode())
+
+        XCTAssertNotNil(decoded)
+        XCTAssertLessThanOrEqual(decoded?.text.utf8.count ?? .max, TextMessage.maxLength)
+        XCTAssertEqual(decoded?.text, String(text.prefix(decoded?.text.count ?? 0)))
+    }
+
+    func testTextMessageChunkedPreservesLongText() {
+        let samples = [
+            String(repeating: "a", count: 300),
+            String(repeating: "日本語", count: 100),
+            String(repeating: "\u{1F600}", count: 100),
+            String(repeating: "👨‍👩‍👧‍👦e\u{301}\n", count: 40)
+        ]
+
+        for text in samples {
+            let messages = TextMessage.chunked(text)
+            XCTAssertGreaterThan(messages.count, 1)
+            var restored = ""
+            for message in messages {
+                let encoded = message.encode()
+                XCTAssertLessThanOrEqual(encoded.count - 2, TextMessage.maxLength)
+                restored += TextMessage.decode(from: encoded)?.text ?? "<decode failed>"
+            }
+            XCTAssertEqual(restored, text)
+        }
+    }
+
+    func testTextMessageChunkedKeepsShortTextInOneMessage() {
+        XCTAssertEqual(TextMessage.chunked("Hello").map(\.text), ["Hello"])
+        XCTAssertTrue(TextMessage.chunked("").isEmpty)
+    }
+
+    func testTextMessageChunkedSplitsOversizedCharacterByScalar() {
+        let text = "a" + String(repeating: "\u{301}", count: 200)
+        let messages = TextMessage.chunked(text)
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages.map(\.text).joined().unicodeScalars.count, text.unicodeScalars.count)
+        XCTAssertTrue(messages.allSatisfy { $0.text.utf8.count <= TextMessage.maxLength })
+    }
+
     // MARK: - ConnectionRequestMessage Tests
 
     func testConnectionRequestMessageEncodeDecodeRoundTrip() {
@@ -164,6 +321,36 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(decoded?.deviceName, original.deviceName)
         XCTAssertEqual(decoded?.deviceId, original.deviceId)
         XCTAssertEqual(decoded?.deviceToken, original.deviceToken)
+    }
+
+    func testConnectionRequestMessageTruncatesUnicodeNameAtCharacterBoundary() {
+        let deviceName = String(repeating: "家族のiPhone👨‍👩‍👧‍👦", count: 10)
+        let message = ConnectionRequestMessage(
+            deviceName: deviceName,
+            deviceId: "12345678-1234-1234-1234-1234567890AB",
+            deviceToken: String(repeating: "b", count: ConnectionRequestMessage.deviceTokenLength)
+        )
+
+        let decoded = ConnectionRequestMessage.decode(from: message.encode())
+
+        XCTAssertNotNil(decoded)
+        XCTAssertTrue(deviceName.hasPrefix(decoded?.deviceName ?? ""))
+        XCTAssertLessThanOrEqual(decoded?.deviceName.utf8.count ?? .max, ConnectionRequestMessage.maxNameLength)
+    }
+
+    func testConnectionRequestMessageDecodesLegacyPayloadWithoutDeviceToken() {
+        var legacyPayload = ConnectionRequestMessage(
+            deviceName: "Legacy iPhone",
+            deviceId: "12345678-1234-1234-1234-1234567890AB",
+            deviceToken: String(repeating: "a", count: ConnectionRequestMessage.deviceTokenLength)
+        ).encode()
+        legacyPayload.removeLast(ConnectionRequestMessage.deviceTokenLength)
+
+        let decoded = ConnectionRequestMessage.decode(from: legacyPayload)
+
+        XCTAssertEqual(decoded?.deviceName, "Legacy iPhone")
+        XCTAssertEqual(decoded?.deviceId, "12345678-1234-1234-1234-1234567890AB")
+        XCTAssertEqual(decoded?.deviceToken, "")
     }
 
     func testConnectionAdmissionDecisionAllowsFirstController() {
@@ -204,6 +391,20 @@ final class ProtocolTests: XCTestCase {
         let decoded = MessageDecoder.decode(from: original.encode())
 
         XCTAssertTrue(decoded is ScrollMessage)
+    }
+
+    func testMessageDecoderModifiedScroll() {
+        let original = ModifiedScrollMessage(deltaX: 0, deltaY: 40, modifiers: .command)
+        let decoded = MessageDecoder.decode(from: original.encode())
+
+        XCTAssertTrue(decoded is ModifiedScrollMessage)
+    }
+
+    func testMessageDecoderVolume() {
+        let original = VolumeMessage(delta: 3)
+        let decoded = MessageDecoder.decode(from: original.encode())
+
+        XCTAssertTrue(decoded is VolumeMessage)
     }
 
     func testMessageDecoderKey() {
