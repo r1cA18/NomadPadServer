@@ -40,7 +40,6 @@ Build and run with Xcode.
 ## Architecture
 
 - **NomadPadServer**: Main menu bar app that handles network connections and input processing
-- **NomadPadHelper**: Login item helper for system-level keyboard shortcuts (Spaces switching)
 - **Shared**: Common protocol definitions
 
 ## Security
