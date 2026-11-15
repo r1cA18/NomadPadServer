@@ -9,6 +9,7 @@ import UserNotifications
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var statusWindow: NSWindow?
     private var networkServer: NetworkServer?
     private var mouseController: MouseController?
     private var updaterController: SPUStandardUpdaterController?
@@ -29,6 +30,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupServer()
         checkAccessibilityPermission()
         requestNotificationPermission()
+        showStatusWindowOnFirstLaunch()
+    }
+
+    // The status item can be hidden by macOS (menu bar space or the "Allow in
+    // the Menu Bar" setting). Opening the app again from Finder or Launchpad
+    // always shows the same status UI in a window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showStatusWindow()
+        return false
     }
 
     // MARK: - Setup
@@ -86,16 +96,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 300, height: 400)
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: StatusView(
-                model: statusModel,
-                pairingManager: pairingManager,
-                onDisconnect: { [weak self] in self?.disconnectClient() },
-                onCheckForUpdates: { [weak self] in self?.checkForUpdates() },
-                onQuit: { [weak self] in self?.quit() }
-            )
-        )
+        popover.contentViewController = NSHostingController(rootView: makeStatusView())
         self.popover = popover
+    }
+
+    private func makeStatusView() -> StatusView {
+        StatusView(
+            model: statusModel,
+            pairingManager: pairingManager,
+            onDisconnect: { [weak self] in self?.disconnectClient() },
+            onCheckForUpdates: { [weak self] in self?.checkForUpdates() },
+            onQuit: { [weak self] in self?.quit() }
+        )
+    }
+
+    private func showStatusWindowOnFirstLaunch() {
+        let key = "didShowStatusWindowOnFirstLaunch"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        showStatusWindow()
+    }
+
+    private func showStatusWindow() {
+        popover?.performClose(nil)
+        if statusWindow == nil {
+            let controller = NSHostingController(rootView: makeStatusView())
+            let window = NSWindow(contentViewController: controller)
+            window.title = "NomadPad Server"
+            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.setContentSize(controller.view.fittingSize)
+            window.isReleasedWhenClosed = false
+            window.center()
+            statusWindow = window
+        }
+        NSApp.activate()
+        statusWindow?.makeKeyAndOrderFront(nil)
     }
 
     private func setupServer() {
